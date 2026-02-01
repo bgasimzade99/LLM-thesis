@@ -1,6 +1,5 @@
 """
-Evaluation module: rubric scoring, hallucination detection, and persistent storage.
-Saves evaluation results to CSV and hallucination flags to JSON for research reproducibility.
+Evaluation: rubric scoring, hallucination detection, persistent storage.
 """
 
 import csv
@@ -8,99 +7,78 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any
 
 from kpi import KPIResult
 
 OUTPUT_DIR = "outputs"
 EVAL_CSV = os.path.join(OUTPUT_DIR, "evaluation_results.csv")
 HALLUCINATION_JSON = os.path.join(OUTPUT_DIR, "hallucination_flags.json")
-
-# Tolerance for numeric comparison (handles rounding, e.g. 25.0 vs 25)
-NUMERIC_TOLERANCE = 0.01
+NUMERIC_TOLERANCE = 0.02
 
 
-def extract_numbers_from_text(text: str) -> set[float]:
-    """
-    Extract numeric values from text for hallucination check.
-    Handles: 1,234.56 | 1234 | 25% (extracts 25) | 25.5
-    """
-    # Match numbers with optional commas and decimals
+def extract_numbers(text: str) -> list[float]:
     pattern = r"\d+(?:,\d{3})*(?:\.\d+)?|\d+\.\d+"
     matches = re.findall(pattern, text)
-    nums = set()
+    nums = []
     for m in matches:
         try:
-            nums.add(float(m.replace(",", "")))
+            nums.append(float(m.replace(",", "")))
         except ValueError:
             pass
     return nums
 
 
-def get_kpi_numbers(kpis: KPIResult) -> set[float]:
-    """Collect all allowed numeric values from the computed KPIs."""
-    nums = set()
-    nums.add(kpis.total_sales)
-    for d in kpis.date_range:
-        if "-" in d:
-            try:
-                nums.add(float(d.split("-")[0]))
-            except (ValueError, IndexError):
-                pass
-    for m in kpis.monthly_trend:
-        nums.add(m["sales"])
-    for c in kpis.top_categories:
-        nums.add(c["sales"])
-    for p in kpis.top_products:
-        nums.add(p["sales"])
-    for r in kpis.regional_distribution:
-        nums.add(r["sales"])
-        nums.add(r["share_pct"])
-    for a in kpis.anomalies:
-        nums.add(a["sales"])
-        nums.add(a["z_score"])
-    return nums
+def get_allowed_numbers(kpi_summary_text: str) -> set[float]:
+    return set(extract_numbers(kpi_summary_text))
 
 
-def _matches_kpi(value: float, kpi_nums: set[float]) -> bool:
-    """Check if value is within tolerance of any KPI number."""
-    return any(abs(value - k) < NUMERIC_TOLERANCE for k in kpi_nums)
+def get_reported_numbers(llm_report_text: str) -> list[float]:
+    return extract_numbers(llm_report_text)
+
+
+def _value_matches(a: float, b: float, tol: float = NUMERIC_TOLERANCE) -> bool:
+    if a == 0 and b == 0:
+        return True
+    if a == 0 or b == 0:
+        return abs(a - b) < tol
+    return abs(a - b) / max(abs(a), abs(b)) < tol or abs(a - b) < tol
+
+
+def detect_suspicious_numbers(
+    kpi_summary_text: str,
+    llm_report_text: str,
+) -> list[str]:
+    allowed = get_allowed_numbers(kpi_summary_text)
+    reported = get_reported_numbers(llm_report_text)
+    suspicious = []
+    for n in reported:
+        if n == int(n) and 1 <= n <= 6:
+            continue
+        if not any(_value_matches(n, a) for a in allowed):
+            suspicious.append(str(n))
+    return suspicious
 
 
 def detect_potential_hallucinations(llm_text: str, kpis: KPIResult) -> list[str]:
-    """
-    Flag numbers in LLM output not present in KPI data.
-    Filters section numbers (1–6) and allows formatting tolerance.
-    Returns list of suspect values as strings.
-    """
-    kpi_nums = get_kpi_numbers(kpis)
-    llm_nums = extract_numbers_from_text(llm_text)
-    suspects = []
-    for n in llm_nums:
-        if n == int(n) and 1 <= n <= 6:
-            continue  # Likely section/list numbering
-        if not _matches_kpi(n, kpi_nums):
-            suspects.append(str(n))
-    return suspects
+    from prompts import build_kpi_summary
+    kpi_summary = build_kpi_summary(kpis)
+    return detect_suspicious_numbers(kpi_summary, llm_text)
 
 
 def save_hallucination_flags(
-    dataset_name: str,
+    run_id: str,
+    scenario: str,
+    scenario_value: str,
     suspicious_numbers: list[str],
-    llm_report_preview: str = "",
 ) -> str:
-    """
-    Save hallucination flags to outputs/hallucination_flags.json.
-    Append new entry; file contains list of flag objects.
-    Returns path to saved file.
-    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.now().isoformat()
     entry = {
+        "run_id": run_id,
         "timestamp": ts,
-        "dataset_name": dataset_name,
+        "scenario": scenario,
+        "scenario_value": scenario_value,
         "suspicious_numbers": suspicious_numbers,
-        "llm_report_preview": llm_report_preview[:500] if llm_report_preview else "",
     }
     existing = []
     if os.path.isfile(HALLUCINATION_JSON):
@@ -116,46 +94,40 @@ def save_hallucination_flags(
 
 
 def save_evaluation_to_csv(
+    run_id: str,
     dataset_name: str,
+    rows_used: int,
+    scenario: str,
+    scenario_value: str,
     clarity: int,
     correctness: int,
     usefulness: int,
     consistency: int,
     comments: str,
-    suspicious_count: int = 0,
+    hallucination_count: int,
+    hallucination_values: str,
 ) -> str:
-    """
-    Append evaluation row to outputs/evaluation_results.csv.
-    Creates file with header if missing.
-    Returns path to CSV.
-    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     row = {
+        "run_id": run_id,
         "timestamp": ts,
         "dataset_name": dataset_name,
+        "rows_used": rows_used,
+        "scenario": scenario,
+        "scenario_value": scenario_value,
         "clarity": clarity,
         "correctness": correctness,
         "usefulness": usefulness,
         "consistency": consistency,
         "comments": comments,
-        "suspicious_numbers_count": suspicious_count,
+        "hallucination_count": hallucination_count,
+        "hallucination_values": hallucination_values,
     }
+    fieldnames = list(row.keys())
     file_exists = os.path.isfile(EVAL_CSV)
     with open(EVAL_CSV, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "timestamp",
-                "dataset_name",
-                "clarity",
-                "correctness",
-                "usefulness",
-                "consistency",
-                "comments",
-                "suspicious_numbers_count",
-            ],
-        )
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
@@ -177,13 +149,7 @@ RUBRIC_DESCRIPTIONS = {
 }
 
 
-def get_default_scores() -> dict[str, int]:
-    """Default rubric scores (middle value)."""
-    return {k: 3 for k in RUBRIC_LABELS}
-
-
 def format_rubric_section(scores: dict[str, int]) -> str:
-    """Format scores as a readable section."""
     lines = []
     for key, label in RUBRIC_LABELS.items():
         val = scores.get(key, 3)

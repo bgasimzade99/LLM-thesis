@@ -1,19 +1,13 @@
 """
-Template-based (rule-based) report generator.
-Produces a fixed-structure business report using the same KPIs as the LLM path.
+Template-based report generator.
 """
 
 from kpi import KPIResult
 
 
 def generate_template_report(kpis: KPIResult) -> str:
-    """
-    Generate a fixed-structure business report from computed KPIs.
-    Sections: Overview, Trends, Top Drivers, Regional Insights, Anomalies, Recommendations.
-    """
     sections = []
 
-    # 1. Overview
     sections.append("## 1. Overview")
     sections.append(
         f"Total sales across the period amount to {kpis.total_sales}. "
@@ -21,7 +15,6 @@ def generate_template_report(kpis: KPIResult) -> str:
     )
     sections.append("")
 
-    # 2. Trends
     sections.append("## 2. Trends")
     if len(kpis.monthly_trend) >= 2:
         latest = kpis.monthly_trend[-1]
@@ -37,7 +30,6 @@ def generate_template_report(kpis: KPIResult) -> str:
         sections.append("Insufficient months for trend analysis.")
     sections.append("")
 
-    # 3. Top Drivers
     sections.append("## 3. Top Drivers")
     if kpis.top_categories:
         top_cat = kpis.top_categories[0]
@@ -51,7 +43,6 @@ def generate_template_report(kpis: KPIResult) -> str:
         sections.append("No category or product data available.")
     sections.append("")
 
-    # 4. Regional Insights
     sections.append("## 4. Regional Insights")
     if kpis.regional_distribution:
         top_region = kpis.regional_distribution[0]
@@ -65,7 +56,6 @@ def generate_template_report(kpis: KPIResult) -> str:
         sections.append("No regional data available.")
     sections.append("")
 
-    # 5. Anomalies
     sections.append("## 5. Anomalies")
     if kpis.anomalies:
         for a in kpis.anomalies:
@@ -77,7 +67,6 @@ def generate_template_report(kpis: KPIResult) -> str:
         sections.append("No significant anomalies detected in monthly sales.")
     sections.append("")
 
-    # 6. Recommendations
     sections.append("## 6. Recommendations")
     if kpis.top_categories and kpis.regional_distribution:
         top_cat = kpis.top_categories[0]["category"]

@@ -1,20 +1,45 @@
 """
-LLM client for single-shot report generation via OpenAI API.
-Logs token usage and fails gracefully if API key is missing.
+LLM client for OpenAI API report generation.
 """
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+
+def _load_env_from_project(project_dir: str | Path) -> None:
+    for d in [Path(project_dir), Path(__file__).resolve().parent, Path.cwd()]:
+        env_file = d / ".env"
+        if env_file.exists():
+            load_dotenv(env_file)
+            return
+
+
+def _get_api_key(project_dir: str | Path) -> str | None:
+    _load_env_from_project(project_dir)
+    key = os.getenv("OPENAI_API_KEY")
+    if key and key.strip() and not key.startswith("sk-your"):
+        return key.strip()
+    for d in [Path(project_dir), Path(__file__).resolve().parent]:
+        env_file = d / ".env"
+        if env_file.exists():
+            try:
+                with open(env_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        s = line.strip()
+                        if s.startswith("OPENAI_API_KEY="):
+                            k = s.split("=", 1)[1].strip().strip('"\'')
+                            if k and not k.startswith("sk-your"):
+                                return k
+            except Exception:
+                pass
+    return None
 
 
 @dataclass
 class LLMUsage:
-    """Token usage and request count."""
-
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -25,18 +50,17 @@ _usage = LLMUsage()
 
 
 def get_usage() -> LLMUsage:
-    """Return current token usage stats."""
     return _usage
 
 
-def generate_report(system_prompt: str, user_prompt: str) -> tuple[str | None, str | None]:
-    """
-    Single-shot completion. No chat history.
-    Returns (report_text, error_message). If success, error_message is None.
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key or not api_key.strip() or api_key.startswith("sk-your"):
-        return None, "OPENAI_API_KEY is missing or invalid. Add it to .env (see .env.example)."
+def generate_report(
+    system_prompt: str,
+    user_prompt: str,
+    env_dir: str | Path,
+) -> tuple[str | None, str | None]:
+    api_key = _get_api_key(env_dir)
+    if not api_key:
+        return None, "OPENAI_API_KEY not found. Add it to .env (see .env.example)."
 
     try:
         from openai import OpenAI
@@ -62,7 +86,6 @@ def generate_report(system_prompt: str, user_prompt: str) -> tuple[str | None, s
 
     text = choice.message.content or ""
 
-    # Log usage
     if response.usage:
         _usage.prompt_tokens += response.usage.prompt_tokens or 0
         _usage.completion_tokens += response.usage.completion_tokens or 0

@@ -1,6 +1,5 @@
 """
-Prompt generation module. Converts computed KPIs into structured natural language
-for LLM consumption. Explicitly instructs the LLM to avoid hallucinations.
+Prompt generation: KPI summary and user prompt for LLM.
 """
 
 from kpi import KPIResult
@@ -13,35 +12,28 @@ If a value is not in the input, do not mention it. Stick strictly to the given d
 
 
 def build_kpi_summary(kpis: KPIResult) -> str:
-    """Convert KPIs into a concise, structured text summary for the LLM."""
     lines = []
-
     lines.append("## Dataset Overview")
     lines.append(f"- Total sales: {kpis.total_sales}")
     lines.append(f"- Date range: {kpis.date_range[0]} to {kpis.date_range[1]}")
     lines.append(f"- Distinct order periods: {kpis.total_orders}")
     lines.append("")
-
     lines.append("## Monthly Sales Trend")
-    for m in kpis.monthly_trend[-12:]:  # Last 12 months if available
+    for m in kpis.monthly_trend[-12:]:
         lines.append(f"- {m['month']}: {m['sales']}")
     lines.append("")
-
     lines.append("## Top 5 Categories by Sales")
     for c in kpis.top_categories:
         lines.append(f"- {c['category']}: {c['sales']}")
     lines.append("")
-
     lines.append("## Top 5 Products by Sales")
     for p in kpis.top_products:
         lines.append(f"- {p['product']}: {p['sales']}")
     lines.append("")
-
     lines.append("## Sales by Region")
     for r in kpis.regional_distribution:
         lines.append(f"- {r['region']}: {r['sales']} ({r['share_pct']}%)")
     lines.append("")
-
     if kpis.anomalies:
         lines.append("## Detected Anomalies")
         for a in kpis.anomalies:
@@ -51,12 +43,10 @@ def build_kpi_summary(kpis: KPIResult) -> str:
         lines.append("## Detected Anomalies")
         lines.append("- None detected.")
         lines.append("")
-
     return "\n".join(lines)
 
 
 def build_user_prompt(kpis: KPIResult) -> str:
-    """Build the full user prompt with KPI summary and instructions."""
     summary = build_kpi_summary(kpis)
     return f"""Based on the following KPI data, write a short executive business report (max 400 words).
 
