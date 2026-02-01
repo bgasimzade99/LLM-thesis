@@ -1,7 +1,3 @@
-"""
-Template-based report generator.
-"""
-
 from kpi import KPIResult
 
 

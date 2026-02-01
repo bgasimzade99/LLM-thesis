@@ -1,7 +1,3 @@
-"""
-LLM-based DSS for Business Reporting.
-"""
-
 import os
 from datetime import datetime
 
@@ -10,7 +6,7 @@ import pandas as pd
 
 from kpi import compute_kpis, KPIResult, normalize_columns
 from prompts import SYSTEM_PROMPT, build_user_prompt, build_kpi_summary
-from llm_client import generate_report, get_usage
+from llm_client import generate_report, get_usage, check_ollama_available, DEFAULT_MODEL
 from template_report import generate_template_report
 from evaluation import (
     detect_suspicious_numbers,
@@ -25,13 +21,42 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 LLM_REPORTS_DIR = os.path.join(OUTPUT_DIR, "llm_reports")
+LLM_REPORTS_RAW_DIR = os.path.join(OUTPUT_DIR, "llm_reports_raw")
 TEMPLATE_REPORTS_DIR = os.path.join(OUTPUT_DIR, "template_reports")
 PROMPTS_DIR = os.path.join(OUTPUT_DIR, "prompts")
+OLLAMA_ENDPOINT = "http://localhost:11434"
+MAX_REPORT_WORDS = 400
 
 
 def ensure_output_dirs():
-    for d in [OUTPUT_DIR, LLM_REPORTS_DIR, TEMPLATE_REPORTS_DIR, PROMPTS_DIR]:
+    for d in [OUTPUT_DIR, LLM_REPORTS_DIR, LLM_REPORTS_RAW_DIR, TEMPLATE_REPORTS_DIR, PROMPTS_DIR]:
         os.makedirs(d, exist_ok=True)
+
+
+def sanitize_markdown_artifacts(text: str) -> str:
+    s = text.replace("**", "").replace("__", "")
+    for sym in ("$", "€", "£"):
+        s = s.replace(sym, "")
+    return s
+
+
+def _show_implicit_computation_warning(llm_report: str, kpi_summary: str) -> None:
+    problematic = ["ranging", "on average", "overall increase"]
+    indicators = ["average", "percent change", "Min anomaly", "Max anomaly"]
+    llm_lower = llm_report.lower()
+    kpi_lower = kpi_summary.lower()
+    has_problematic = any(p in llm_lower for p in problematic)
+    has_indicator = any(i.lower() in kpi_lower for i in indicators)
+    if has_problematic and not has_indicator:
+        st.warning("Possible implicit computation: report uses range/average wording not backed by KPI input.")
+
+
+def truncate_report(text: str, max_words: int = MAX_REPORT_WORDS) -> tuple[str, bool]:
+    words = text.split()
+    if len(words) <= max_words:
+        return text, False
+    truncated = " ".join(words[:max_words])
+    return truncated + "\n\n[Report truncated to 400 words.]", True
 
 
 def load_default_dataset() -> tuple[pd.DataFrame | None, str]:
@@ -85,7 +110,8 @@ scenario_value: {scenario_value}
 
 def save_reports_reproducible(
     run_id: str,
-    llm_report: str,
+    llm_report_raw: str,
+    llm_report_sanitized: str,
     template_report: str,
     user_prompt: str,
     system_prompt: str,
@@ -93,11 +119,12 @@ def save_reports_reproducible(
     rows_used: int,
     scenario: str,
     scenario_value: str,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     ensure_output_dirs()
     header = _metadata_header(run_id, dataset_name, rows_used, scenario, scenario_value)
 
     prompt_path = os.path.join(PROMPTS_DIR, f"prompt_{run_id}.txt")
+    llm_raw_path = os.path.join(LLM_REPORTS_RAW_DIR, f"llm_report_raw_{run_id}.md")
     llm_path = os.path.join(LLM_REPORTS_DIR, f"llm_report_{run_id}.md")
     template_path = os.path.join(TEMPLATE_REPORTS_DIR, f"template_report_{run_id}.md")
 
@@ -105,15 +132,19 @@ def save_reports_reproducible(
         f.write(header)
         f.write(f"=== SYSTEM PROMPT ===\n{system_prompt}\n\n=== USER PROMPT ===\n{user_prompt}")
 
+    with open(llm_raw_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write(llm_report_raw)
+
     with open(llm_path, "w", encoding="utf-8") as f:
         f.write(header)
-        f.write(llm_report)
+        f.write(llm_report_sanitized)
 
     with open(template_path, "w", encoding="utf-8") as f:
         f.write(header)
         f.write(template_report)
 
-    return llm_path, template_path, prompt_path
+    return llm_path, llm_raw_path, template_path, prompt_path
 
 
 def init_session_state():
@@ -144,6 +175,28 @@ def main():
 
     ensure_output_dirs()
     init_session_state()
+
+    ollama_available = check_ollama_available()
+    model_name = st.text_input(
+        "Ollama model",
+        value=DEFAULT_MODEL,
+        placeholder="llama3",
+        key="model_input",
+    )
+    model = model_name or DEFAULT_MODEL
+
+    with st.expander("Model / Runtime Status", expanded=True):
+        st.write(f"**Provider:** Ollama (local)")
+        st.write(f"**Model:** {model}")
+        st.write(f"**Endpoint:** {OLLAMA_ENDPOINT}")
+        if ollama_available:
+            st.success("Status: Reachable")
+        else:
+            st.error("Status: Unreachable")
+            st.caption(
+                "How to fix: Install Ollama from ollama.ai, run `ollama serve`, "
+                "and `ollama pull llama3` (or your model name)."
+            )
 
     default_df, default_name = load_default_dataset()
     has_default = default_df is not None
@@ -205,26 +258,31 @@ def main():
         user_prompt = build_user_prompt(kpis)
 
         with st.spinner("Generating LLM report..."):
-            llm_report, err = generate_report(SYSTEM_PROMPT, user_prompt, env_dir=BASE_DIR)
+            llm_report_raw, err = generate_report(SYSTEM_PROMPT, user_prompt, model=model)
 
         llm_error = err
         if err:
             st.warning(f"LLM: {err}")
-            if "not found" in err.lower() or "missing" in err.lower():
-                with st.expander("Debug: .env path"):
-                    st.code(f"BASE_DIR: {BASE_DIR}\n.env: {os.path.join(BASE_DIR, '.env')}\nExists: {os.path.isfile(os.path.join(BASE_DIR, '.env'))}")
-            llm_report = None
+            llm_report_raw = None
         else:
             llm_error = None
 
+        llm_report_sanitized = ""
+        if llm_report_raw:
+            llm_report_truncated, _ = truncate_report(llm_report_raw)
+            llm_report_sanitized = sanitize_markdown_artifacts(llm_report_truncated)
+        else:
+            llm_report_sanitized = "(LLM not generated)"
+
         suspects = []
-        if llm_report:
-            suspects = detect_suspicious_numbers(kpi_summary, llm_report)
+        if llm_report_raw:
+            suspects = detect_suspicious_numbers(kpi_summary, llm_report_raw)
 
         run_id = get_run_id()
-        llm_p, template_p, prompt_p = save_reports_reproducible(
+        llm_p, llm_raw_p, template_p, prompt_p = save_reports_reproducible(
             run_id=run_id,
-            llm_report=llm_report or "(LLM not generated)",
+            llm_report_raw=llm_report_raw or "(LLM not generated)",
+            llm_report_sanitized=llm_report_sanitized,
             template_report=template_report,
             user_prompt=user_prompt,
             system_prompt=SYSTEM_PROMPT,
@@ -234,14 +292,14 @@ def main():
             scenario_value=scenario_value,
         )
 
-        if suspects and llm_report:
+        if suspects and llm_report_raw:
             save_hallucination_flags(run_id, scenario, scenario_value, suspects)
 
         st.session_state.reports_generated = True
         st.session_state.run_id = run_id
         st.session_state.kpis = kpis
         st.session_state.kpi_summary = kpi_summary
-        st.session_state.llm_report = llm_report
+        st.session_state.llm_report = llm_report_sanitized
         st.session_state.template_report = template_report
         st.session_state.user_prompt = user_prompt
         st.session_state.dataset_name = dataset_name
@@ -250,7 +308,7 @@ def main():
         st.session_state.scenario_value = scenario_value
         st.session_state.suspects = suspects
         st.session_state.llm_error = llm_error
-        st.session_state.saved_paths = (llm_p, template_p, prompt_p)
+        st.session_state.saved_paths = (llm_p, llm_raw_p, template_p, prompt_p)
         st.rerun()
 
     if not st.session_state.reports_generated:
@@ -272,12 +330,14 @@ def main():
     if saved_paths:
         with st.expander("Saved outputs", expanded=False):
             st.write(f"Run ID: `{run_id}`")
-            st.write(f"- LLM: `{saved_paths[0]}`")
-            st.write(f"- Template: `{saved_paths[1]}`")
-            st.write(f"- Prompt: `{saved_paths[2]}`")
+            st.write(f"- LLM (sanitized): `{saved_paths[0]}`")
+            st.write(f"- LLM (raw): `{saved_paths[1]}`")
+            st.write(f"- Template: `{saved_paths[2]}`")
+            st.write(f"- Prompt: `{saved_paths[3]}`")
 
-    with st.expander("KPI Summary", expanded=False):
+    with st.expander("KPI Summary (input to LLM)", expanded=False):
         st.code(kpi_summary, language=None)
+        st.caption("Input to LLM. No raw rows.")
 
     st.subheader("Report Comparison")
     col1, col2 = st.columns(2)
@@ -285,9 +345,9 @@ def main():
     with col1:
         st.markdown("#### LLM Report")
         if llm_report:
-            st.markdown(llm_report.replace("\n", "  \n"))
+            st.code(llm_report, language=None)
             usage = get_usage()
-            st.caption(f"Tokens: {usage.prompt_tokens} in / {usage.completion_tokens} out")
+            st.caption(f"Requests: {usage.request_count}")
             st.download_button(
                 "Download LLM Report",
                 data=llm_report,
@@ -296,12 +356,10 @@ def main():
                 key="dl_llm",
             )
         else:
-            if llm_error and "429" in llm_error:
-                st.warning("LLM report not available. OpenAI quota exceeded — add credits at platform.openai.com.")
-            elif llm_error:
-                st.warning(f"LLM report not available. {llm_error[:200]}...")
+            if llm_error:
+                st.warning(f"LLM report not available. {llm_error[:250]}...")
             else:
-                st.warning("LLM report not available. Add OPENAI_API_KEY to .env.")
+                st.warning("LLM report not available. Ensure Ollama is running (ollama serve).")
 
     with col2:
         st.markdown("#### Template Report")
@@ -313,6 +371,8 @@ def main():
             mime="text/markdown",
             key="dl_template",
         )
+
+    _show_implicit_computation_warning(llm_report or "", kpi_summary)
 
     st.subheader("Hallucination Check")
     if suspects:

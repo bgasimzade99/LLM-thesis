@@ -1,14 +1,8 @@
-"""
-Evaluation: rubric scoring, hallucination detection, persistent storage.
-"""
-
 import csv
 import json
 import os
 import re
 from datetime import datetime
-
-from kpi import KPIResult
 
 OUTPUT_DIR = "outputs"
 EVAL_CSV = os.path.join(OUTPUT_DIR, "evaluation_results.csv")
@@ -57,12 +51,6 @@ def detect_suspicious_numbers(
         if not any(_value_matches(n, a) for a in allowed):
             suspicious.append(str(n))
     return suspicious
-
-
-def detect_potential_hallucinations(llm_text: str, kpis: KPIResult) -> list[str]:
-    from prompts import build_kpi_summary
-    kpi_summary = build_kpi_summary(kpis)
-    return detect_suspicious_numbers(kpi_summary, llm_text)
 
 
 def save_hallucination_flags(

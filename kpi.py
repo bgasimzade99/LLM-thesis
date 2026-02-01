@@ -1,7 +1,3 @@
-"""
-KPI computation from Superstore Sales data.
-"""
-
 import pandas as pd
 import numpy as np
 from typing import Any
@@ -48,6 +44,10 @@ class KPIResult:
     total_sales: float = 0.0
     total_orders: int = 0
     date_range: tuple[str, str] = ("", "")
+    peak_month: str = ""
+    peak_value: float = 0.0
+    lowest_month: str = ""
+    lowest_value: float = 0.0
 
 
 def compute_kpis(df: pd.DataFrame) -> KPIResult:
@@ -98,6 +98,13 @@ def compute_kpis(df: pd.DataFrame) -> KPIResult:
 
     anomalies = _detect_anomalies(monthly_trend)
 
+    peak_month, peak_value = "", 0.0
+    lowest_month, lowest_value = "", 0.0
+    if monthly_trend:
+        by_sales = sorted(monthly_trend, key=lambda x: x["sales"])
+        lowest_month, lowest_value = by_sales[0]["month"], by_sales[0]["sales"]
+        peak_month, peak_value = by_sales[-1]["month"], by_sales[-1]["sales"]
+
     return KPIResult(
         monthly_trend=monthly_trend,
         top_categories=top_categories,
@@ -107,6 +114,10 @@ def compute_kpis(df: pd.DataFrame) -> KPIResult:
         total_sales=round(total_sales, 2),
         total_orders=total_orders,
         date_range=date_range,
+        peak_month=peak_month,
+        peak_value=round(peak_value, 2),
+        lowest_month=lowest_month,
+        lowest_value=round(lowest_value, 2),
     )
 
 

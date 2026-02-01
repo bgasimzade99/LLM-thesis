@@ -1,11 +1,6 @@
 # LLM-based DSS for Business Reporting
 
-Bachelor thesis prototype. Compares LLM-generated reports with template-based reports.
-
-## Dataset
-
-Superstore Sales CSV: Order Date, Category, Sub-Category, Product Name, Region, Sales.
-Default: `data/train.csv`.
+Bachelor thesis prototype. Compares LLM-generated reports with template-based reports. Uses Ollama for local LLM (no API keys).
 
 ## Setup
 
@@ -16,15 +11,23 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
+## Ollama
+
+1. Install: https://ollama.ai
+2. `ollama pull llama3`
+3. Ensure Ollama is running
 
 ## Run
 
 ```powershell
-python run_app.py
+.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Or: `streamlit run app.py`
+Or double-click `run.bat`
+
+## Dataset
+
+Superstore Sales CSV. Default: `data/train.csv`
 
 ## Outputs
 

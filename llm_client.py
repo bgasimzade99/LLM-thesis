@@ -1,48 +1,15 @@
-"""
-LLM client for OpenAI API report generation.
-"""
-
-import os
 from dataclasses import dataclass
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-
-def _load_env_from_project(project_dir: str | Path) -> None:
-    for d in [Path(project_dir), Path(__file__).resolve().parent, Path.cwd()]:
-        env_file = d / ".env"
-        if env_file.exists():
-            load_dotenv(env_file)
-            return
-
-
-def _get_api_key(project_dir: str | Path) -> str | None:
-    _load_env_from_project(project_dir)
-    key = os.getenv("OPENAI_API_KEY")
-    if key and key.strip() and not key.startswith("sk-your"):
-        return key.strip()
-    for d in [Path(project_dir), Path(__file__).resolve().parent]:
-        env_file = d / ".env"
-        if env_file.exists():
-            try:
-                with open(env_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        s = line.strip()
-                        if s.startswith("OPENAI_API_KEY="):
-                            k = s.split("=", 1)[1].strip().strip('"\'')
-                            if k and not k.startswith("sk-your"):
-                                return k
-            except Exception:
-                pass
-    return None
+DEFAULT_MODEL = "llama3"
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_UNAVAILABLE_MSG = (
+    "Ollama not available. Run: ollama pull llama3 && ollama serve "
+    "(or open Ollama app)."
+)
 
 
 @dataclass
 class LLMUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
     request_count: int = 0
 
 
@@ -53,43 +20,57 @@ def get_usage() -> LLMUsage:
     return _usage
 
 
+def check_ollama_available() -> bool:
+    try:
+        import requests
+        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def generate_report(
     system_prompt: str,
     user_prompt: str,
-    env_dir: str | Path,
+    model: str = DEFAULT_MODEL,
 ) -> tuple[str | None, str | None]:
-    api_key = _get_api_key(env_dir)
-    if not api_key:
-        return None, "OPENAI_API_KEY not found. Add it to .env (see .env.example)."
+    try:
+        import requests
+    except ImportError:
+        return None, "requests package not installed. Run: pip install requests"
+
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+    payload = {
+        "model": model.strip() or DEFAULT_MODEL,
+        "prompt": full_prompt,
+        "stream": False,
+    }
 
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=400,
-            temperature=0.2,
-        )
-    except ImportError:
-        return None, "OpenAI package not installed. Run: pip install openai"
+        r = requests.post(OLLAMA_URL, json=payload, timeout=120)
+    except requests.exceptions.ConnectionError:
+        return None, OLLAMA_UNAVAILABLE_MSG
+    except requests.exceptions.Timeout:
+        return None, "Ollama request timed out. Try a smaller model or shorter prompt."
     except Exception as e:
-        return None, f"API error: {str(e)}"
+        return None, f"Ollama error: {str(e)}"
 
-    choice = response.choices[0] if response.choices else None
-    if not choice or not choice.message:
-        return None, "Empty response from API"
+    if r.status_code != 200:
+        try:
+            err = r.json().get("error", r.text[:200])
+        except Exception:
+            err = r.text[:200] if r.text else str(r.status_code)
+        return None, f"Ollama returned {r.status_code}: {err}"
 
-    text = choice.message.content or ""
+    try:
+        data = r.json()
+    except Exception as e:
+        return None, f"Invalid Ollama response: {str(e)}"
 
-    if response.usage:
-        _usage.prompt_tokens += response.usage.prompt_tokens or 0
-        _usage.completion_tokens += response.usage.completion_tokens or 0
-        _usage.total_tokens += response.usage.total_tokens or 0
+    text = data.get("response")
+    if text is None:
+        return None, "Ollama returned empty response"
+
     _usage.request_count += 1
-
     return text.strip(), None
