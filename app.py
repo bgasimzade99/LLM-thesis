@@ -1,13 +1,16 @@
+import json
 import os
 from datetime import datetime
 
 import streamlit as st
 import pandas as pd
 
-from kpi import compute_kpis, KPIResult, normalize_columns
-from prompts import SYSTEM_PROMPT, build_user_prompt, build_kpi_summary
+from kpi import compute_kpis, normalize_columns, get_kpi_definitions
+from kpi_definitions import KPI_DEFINITIONS
+from decision_engine import run_decision_engine, RULE_DEFINITIONS
+from rule_based_report import generate_rule_based_report, get_rule_definitions
+from prompts import SYSTEM_PROMPT, build_user_prompt, build_decision_summary
 from llm_client import generate_report, get_usage, check_ollama_available, DEFAULT_MODEL
-from template_report import generate_template_report
 from evaluation import (
     detect_suspicious_numbers,
     save_hallucination_flags,
@@ -24,13 +27,102 @@ LLM_REPORTS_DIR = os.path.join(OUTPUT_DIR, "llm_reports")
 LLM_REPORTS_RAW_DIR = os.path.join(OUTPUT_DIR, "llm_reports_raw")
 TEMPLATE_REPORTS_DIR = os.path.join(OUTPUT_DIR, "template_reports")
 PROMPTS_DIR = os.path.join(OUTPUT_DIR, "prompts")
+KPI_TABLES_DIR = os.path.join(OUTPUT_DIR, "kpi_tables")
+DEFINITIONS_DIR = os.path.join(OUTPUT_DIR, "definitions")
+DECISIONS_DIR = os.path.join(OUTPUT_DIR, "decisions")
 OLLAMA_ENDPOINT = "http://localhost:11434"
 MAX_REPORT_WORDS = 400
 
 
 def ensure_output_dirs():
-    for d in [OUTPUT_DIR, LLM_REPORTS_DIR, LLM_REPORTS_RAW_DIR, TEMPLATE_REPORTS_DIR, PROMPTS_DIR]:
+    for d in [
+        OUTPUT_DIR,
+        LLM_REPORTS_DIR,
+        LLM_REPORTS_RAW_DIR,
+        TEMPLATE_REPORTS_DIR,
+        PROMPTS_DIR,
+        KPI_TABLES_DIR,
+        DEFINITIONS_DIR,
+        DECISIONS_DIR,
+    ]:
         os.makedirs(d, exist_ok=True)
+
+
+def _decision_result_to_structured(decision_result) -> dict:
+    """Build JSON-serializable view of DecisionResult (no raw KPI data)."""
+    dr = decision_result
+    out = {
+        "fired_rule_ids": list(dr.fired_rule_ids),
+        "recommendations": list(dr.recommendations),
+        "rule_explanations": list(dr.rule_explanations),
+        "trend": None,
+        "anomalies": [],
+        "concentration": [],
+    }
+    if dr.trend:
+        t = dr.trend
+        out["trend"] = {
+            "label": t.label,
+            "mom_change_pct": t.mom_change_pct,
+            "prev_month": t.prev_month,
+            "latest_month": t.latest_month,
+            "prev_sales": t.prev_sales,
+            "latest_sales": t.latest_sales,
+        }
+    for a in dr.anomalies:
+        out["anomalies"].append({
+            "month": a.month,
+            "sales": a.sales,
+            "z_score": a.z_score,
+            "type": a.type,
+            "label": a.label,
+        })
+    for c in dr.concentration:
+        out["concentration"].append({
+            "entity_type": c.entity_type,
+            "entity_name": c.entity_name,
+            "share_pct": c.share_pct,
+            "label": c.label,
+        })
+    return out
+
+
+def save_decision_json(
+    run_id: str,
+    scenario: str,
+    scenario_value: str,
+    decision_result,
+) -> str:
+    """Write decision output to outputs/decisions/decision_<run_id>.json."""
+    ensure_output_dirs()
+    structured = _decision_result_to_structured(decision_result)
+    payload = {
+        "run_id": run_id,
+        "scenario": scenario,
+        "scenario_value": scenario_value,
+        "fired_rule_ids": structured["fired_rule_ids"],
+        "decisions": {
+            "trend": structured["trend"],
+            "anomalies": structured["anomalies"],
+            "concentration": structured["concentration"],
+        },
+        "recommendations": structured["recommendations"],
+        "rule_explanations": structured["rule_explanations"],
+    }
+    path = os.path.join(DECISIONS_DIR, f"decision_{run_id}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def save_definitions_and_tables(run_id: str, kpi_table_df: pd.DataFrame) -> None:
+    """Save KPI table, KPI definitions, and rule definitions for reproducibility."""
+    ensure_output_dirs()
+    kpi_table_df.to_csv(os.path.join(KPI_TABLES_DIR, f"kpi_table_{run_id}.csv"), index=False)
+    with open(os.path.join(DEFINITIONS_DIR, "kpi_definitions.json"), "w", encoding="utf-8") as f:
+        json.dump(KPI_DEFINITIONS, f, indent=2, ensure_ascii=False)
+    with open(os.path.join(DEFINITIONS_DIR, "rule_definitions.json"), "w", encoding="utf-8") as f:
+        json.dump(get_rule_definitions(), f, indent=2, ensure_ascii=False)
 
 
 def sanitize_markdown_artifacts(text: str) -> str:
@@ -127,6 +219,7 @@ def save_reports_reproducible(
     llm_raw_path = os.path.join(LLM_REPORTS_RAW_DIR, f"llm_report_raw_{run_id}.md")
     llm_path = os.path.join(LLM_REPORTS_DIR, f"llm_report_{run_id}.md")
     template_path = os.path.join(TEMPLATE_REPORTS_DIR, f"template_report_{run_id}.md")
+    rule_based_path = os.path.join(TEMPLATE_REPORTS_DIR, f"rule_based_report_{run_id}.md")
 
     with open(prompt_path, "w", encoding="utf-8") as f:
         f.write(header)
@@ -144,6 +237,10 @@ def save_reports_reproducible(
         f.write(header)
         f.write(template_report)
 
+    with open(rule_based_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write(template_report)
+
     return llm_path, llm_raw_path, template_path, prompt_path
 
 
@@ -152,10 +249,12 @@ def init_session_state():
         "reports_generated": False,
         "run_id": None,
         "kpis": None,
+        "kpi_table_df": None,
         "llm_report": None,
         "template_report": None,
         "user_prompt": None,
-        "kpi_summary": None,
+        "decision_summary": None,
+        "decision_result": None,
         "dataset_name": "unknown",
         "rows_used": 0,
         "scenario": "Full dataset",
@@ -172,9 +271,37 @@ def init_session_state():
 def main():
     st.set_page_config(page_title="LLM DSS - Business Report", layout="wide")
     st.title("LLM-based Decision Support System")
+    st.caption(
+        "Step 1: Deterministic KPI Computation (No AI) → "
+        "Step 2: Rule-Based Decision Engine (No AI) → "
+        "Step 3: Rule-Based Baseline Report (No AI) → "
+        "Step 4: LLM-Based Explanation Layer (Optional)"
+    )
 
     ensure_output_dirs()
     init_session_state()
+
+    with st.expander("KPI Definitions (Why and How)", expanded=False):
+        for name, defn in get_kpi_definitions().items():
+            st.markdown(f"**{name}**")
+            st.write(f"- Required columns: {defn.get('required_columns', [])}")
+            st.write(f"- Formula: {defn.get('formula', 'N/A')}")
+            st.write(f"- Business question: {defn.get('business_question', 'N/A')}")
+            st.write(f"- Why selected: {defn.get('why_selected', 'N/A')}")
+            st.write(f"- Interpretation note: {defn.get('interpretation_note', 'N/A')}")
+            st.write(f"- Output type: {defn.get('output_type', 'N/A')}")
+            st.divider()
+
+    with st.expander("Rule Definitions (Baseline Logic)", expanded=False):
+        st.caption("Thresholds are heuristics for consistent baseline comparison, NOT industry benchmarks.")
+        for rule_id, defn in get_rule_definitions().items():
+            st.markdown(f"**{rule_id}**")
+            st.write(f"- Condition: {defn.get('condition', 'N/A')}")
+            st.write(f"- Threshold: {defn.get('threshold', 'N/A')}")
+            st.write(f"- Why threshold: {defn.get('why_threshold', 'N/A')}")
+            st.write(f"- Business rationale: {defn.get('business_rationale', 'N/A')}")
+            st.write(f"- Message template: {defn.get('message_template', 'N/A')}")
+            st.divider()
 
     ollama_available = check_ollama_available()
     model_name = st.text_input(
@@ -244,20 +371,27 @@ def main():
     rows_used = len(df_filtered)
     st.caption(f"Rows: **{rows_used:,}**")
 
+    st.subheader("Step 1: Deterministic KPI Computation (No AI)")
+    st.caption("KPIs derived from dataset columns: time, sales, product, region.")
     st.subheader("Dataset Preview")
     st.dataframe(df_filtered.head(20), use_container_width=True)
 
     if st.button("Generate Business Report", type="primary"):
-        with st.spinner("Computing KPIs..."):
-            kpis = compute_kpis(df_filtered)
+        # Explicit pipeline: df -> compute_kpis() -> run_decision_engine() -> generate_rule_based_report()
+        with st.spinner("Step 1: Deterministic KPI Computation (No AI)..."):
+            comp_result = compute_kpis(df_filtered)
+            kpis = comp_result.kpis
+            kpi_table_df = comp_result.kpi_table_df
+            kpi_summary_text = comp_result.kpi_summary_text
 
-        with st.spinner("Generating template report..."):
-            template_report = generate_template_report(kpis)
+        with st.spinner("Step 2: Rule-Based Decision Engine (No AI)..."):
+            decision_result = run_decision_engine(kpis)
+            template_report = generate_rule_based_report(decision_result)
 
-        kpi_summary = build_kpi_summary(kpis)
-        user_prompt = build_user_prompt(kpis)
+        decision_summary = build_decision_summary(decision_result)
+        user_prompt = build_user_prompt(decision_result)
 
-        with st.spinner("Generating LLM report..."):
+        with st.spinner("Step 4: LLM-Based Explanation Layer (Optional)..."):
             llm_report_raw, err = generate_report(SYSTEM_PROMPT, user_prompt, model=model)
 
         llm_error = err
@@ -276,9 +410,11 @@ def main():
 
         suspects = []
         if llm_report_raw:
-            suspects = detect_suspicious_numbers(kpi_summary, llm_report_raw)
+            suspects = detect_suspicious_numbers(decision_summary, llm_report_raw)
 
         run_id = get_run_id()
+        save_definitions_and_tables(run_id, kpi_table_df)
+        save_decision_json(run_id, scenario, scenario_value, decision_result)
         llm_p, llm_raw_p, template_p, prompt_p = save_reports_reproducible(
             run_id=run_id,
             llm_report_raw=llm_report_raw or "(LLM not generated)",
@@ -298,7 +434,9 @@ def main():
         st.session_state.reports_generated = True
         st.session_state.run_id = run_id
         st.session_state.kpis = kpis
-        st.session_state.kpi_summary = kpi_summary
+        st.session_state.kpi_table_df = kpi_table_df
+        st.session_state.decision_summary = decision_summary
+        st.session_state.decision_result = decision_result
         st.session_state.llm_report = llm_report_sanitized
         st.session_state.template_report = template_report
         st.session_state.user_prompt = user_prompt
@@ -316,7 +454,9 @@ def main():
 
     run_id = st.session_state.run_id
     kpis = st.session_state.kpis
-    kpi_summary = st.session_state.kpi_summary
+    kpi_table_df = st.session_state.kpi_table_df
+    decision_summary = st.session_state.decision_summary
+    decision_result = st.session_state.decision_result
     llm_report = st.session_state.llm_report
     template_report = st.session_state.template_report
     saved_paths = st.session_state.saved_paths
@@ -327,52 +467,84 @@ def main():
     suspects = st.session_state.suspects
     llm_error = st.session_state.get("llm_error")
 
+    st.subheader("Step 1: Deterministic KPI Computation (No AI)")
+    if kpi_table_df is not None and not kpi_table_df.empty:
+        st.dataframe(kpi_table_df, use_container_width=True)
+        st.caption("Structured KPI output. Saved to outputs/kpi_tables/")
+    else:
+        st.info("KPI table will appear after report generation.")
+
+    st.subheader("Step 2: Rule-Based Decision Engine (No AI)")
+    st.caption("Fired rules and structured decision output are shown in the expanders below.")
+
+    st.subheader("Step 3: Rule-Based Baseline Report (No AI)")
+    st.markdown(template_report.replace("\n", "  \n"))
+    st.download_button(
+        "Download Rule-Based Report",
+        data=template_report,
+        file_name=f"rule_based_report_{run_id}.md",
+        mime="text/markdown",
+        key="dl_template",
+    )
+
+    st.subheader("Step 4: LLM-Based Explanation Layer (Optional)")
+    st.warning(
+        "LLM output does not influence KPI values or decisions. It only verbalizes deterministic outcomes."
+    )
+    if llm_report:
+        st.code(llm_report, language=None)
+        usage = get_usage()
+        st.caption(f"Requests: {usage.request_count}")
+        st.download_button(
+            "Download LLM Report",
+            data=llm_report,
+            file_name=f"llm_report_{run_id}.md",
+            mime="text/markdown",
+            key="dl_llm",
+        )
+    else:
+        if llm_error:
+            st.warning(f"LLM report not available. {llm_error[:250]}...")
+        else:
+            st.warning("LLM report not available. Ensure Ollama is running (ollama serve).")
+
+    with st.expander("Fired Rules (Decision Engine)", expanded=False):
+        if decision_result is not None and decision_result.fired_rule_ids:
+            for rid in decision_result.fired_rule_ids:
+                st.markdown(f"**{rid}**")
+                defn = RULE_DEFINITIONS.get(rid, {})
+                st.write(f"- Condition: {defn.get('condition', 'N/A')}")
+                st.write(f"- Threshold: {defn.get('threshold', 'N/A')}")
+                st.write(f"- Why threshold: {defn.get('why_threshold', 'N/A')}")
+                st.divider()
+        else:
+            st.caption("No rules fired for this run (or run not yet generated).")
+
+    with st.expander("Decision Output (Structured)", expanded=False):
+        if decision_result is not None:
+            structured = _decision_result_to_structured(decision_result)
+            st.json(structured)
+        else:
+            st.caption("Decision output will appear after report generation.")
+
     if saved_paths:
         with st.expander("Saved outputs", expanded=False):
             st.write(f"Run ID: `{run_id}`")
+            st.write(f"- KPI table: `{os.path.join(KPI_TABLES_DIR, f'kpi_table_{run_id}.csv')}`")
+            st.write(f"- Decision: `{os.path.join(DECISIONS_DIR, f'decision_{run_id}.json')}`")
+            st.write(f"- Rule-based report: `{os.path.join(TEMPLATE_REPORTS_DIR, f'rule_based_report_{run_id}.md')}`")
+            st.write(f"- KPI definitions: `{os.path.join(DEFINITIONS_DIR, 'kpi_definitions.json')}`")
+            st.write(f"- Rule definitions: `{os.path.join(DEFINITIONS_DIR, 'rule_definitions.json')}`")
             st.write(f"- LLM (sanitized): `{saved_paths[0]}`")
             st.write(f"- LLM (raw): `{saved_paths[1]}`")
-            st.write(f"- Template: `{saved_paths[2]}`")
+            st.write(f"- Rule-based report: `{saved_paths[2]}`")
             st.write(f"- Prompt: `{saved_paths[3]}`")
 
-    with st.expander("KPI Summary (input to LLM)", expanded=False):
-        st.code(kpi_summary, language=None)
-        st.caption("Input to LLM. No raw rows.")
+    with st.expander("Decision Input (input to LLM)", expanded=False):
+        st.code(decision_summary, language=None)
+        st.caption("Input to LLM: rule outcomes only. No raw rows.")
 
-    st.subheader("Report Comparison")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("#### LLM Report")
-        if llm_report:
-            st.code(llm_report, language=None)
-            usage = get_usage()
-            st.caption(f"Requests: {usage.request_count}")
-            st.download_button(
-                "Download LLM Report",
-                data=llm_report,
-                file_name=f"llm_report_{run_id}.md",
-                mime="text/markdown",
-                key="dl_llm",
-            )
-        else:
-            if llm_error:
-                st.warning(f"LLM report not available. {llm_error[:250]}...")
-            else:
-                st.warning("LLM report not available. Ensure Ollama is running (ollama serve).")
-
-    with col2:
-        st.markdown("#### Template Report")
-        st.markdown(template_report.replace("\n", "  \n"))
-        st.download_button(
-            "Download Template Report",
-            data=template_report,
-            file_name=f"template_report_{run_id}.md",
-            mime="text/markdown",
-            key="dl_template",
-        )
-
-    _show_implicit_computation_warning(llm_report or "", kpi_summary)
+    _show_implicit_computation_warning(llm_report or "", decision_summary)
 
     st.subheader("Hallucination Check")
     if suspects:

@@ -1,3 +1,16 @@
+"""
+LLM Client — Explanation layer only (Type 3 thesis).
+
+The LLM receives ONLY the output of the rule-based decision engine.
+It does NOT:
+- Perform calculations
+- Make decisions (positive/negative/attention)
+- Interpret raw KPIs
+
+The LLM's role: explain pre-computed rule outcomes in natural language.
+All deterministic logic happens in kpi.py and decision_engine.py.
+"""
+
 from dataclasses import dataclass
 
 DEFAULT_MODEL = "llama3"
