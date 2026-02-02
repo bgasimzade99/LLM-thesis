@@ -200,7 +200,11 @@ def _build_kpi_table_df(kpis: KPIResult) -> pd.DataFrame:
     if kpis.lowest_month:
         rows.append({"kpi_name": "lowest_month", "dimension": kpis.lowest_month, "value": kpis.lowest_value, "extra": ""})
 
-    return pd.DataFrame(rows)
+    df_out = pd.DataFrame(rows)
+    # Ensure value/extra are string so Streamlit/PyArrow don't fail on mixed types (e.g. date_range string vs numeric)
+    df_out["value"] = df_out["value"].astype(str)
+    df_out["extra"] = df_out["extra"].astype(str)
+    return df_out
 
 
 def compute_kpis(df: pd.DataFrame) -> KPIComputationResult:

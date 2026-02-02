@@ -53,20 +53,19 @@ Rules are **data-driven and dataset-relative**:
 | MoM trend       | ≤ -10%         | negative   | Meaningful downward change                   |
 | MoM trend       | otherwise      | stable     | Within normal fluctuation                    |
 | Anomaly         | \|z\| > 1.5    | attention  | Dataset-relative outlier (z-score)           |
-| Concentration   | Top category share ≥ 30% | attention | Over-reliance on single category   |
-| Concentration   | Top region share ≥ 35%  | attention | Over-reliance on single region    |
+| Concentration   | Top category share ≥ 35% | attention | Dominant category; key driver   |
+| Concentration   | Top region share ≥ 30%   | attention | Over-reliance on single region |
 
 Thresholds are heuristics for thesis clarity. They are not industry benchmarks.
 
-## LLM Role Restriction
+## LLM Input Boundary
 
-The LLM receives **only** the output of the rule-based decision engine (labels + rule explanations). It does **not**:
+The LLM receives **only** two deterministic inputs; it **never** sees raw dataset rows:
 
-- Perform calculations
-- Make decisions (positive / negative / attention)
-- Interpret raw KPIs
+1. **Deterministic KPI summary** — aggregated values (totals, trends, top lists, regional shares, anomalies) produced by `kpi.py`.
+2. **Structured decision output** — labels, rule explanations, and recommendations produced by the rule-based decision engine.
 
-The LLM is an **explanation layer only**.
+The LLM does **not** perform calculations, assign decision labels, or interpret raw KPIs. It is an **explanation layer only**: it verbalizes these pre-computed outcomes in natural language.
 
 ## Setup
 
@@ -93,9 +92,22 @@ Or double-click `run.bat`
 
 ## Dataset
 
-Superstore Sales CSV. Default: `data/train.csv`
+A **realistic sales dataset** in CSV format is used for deterministic KPI computation. Place your file as `data/train.csv` (or in the project root as `train.csv`) to use it as the default. Otherwise, upload a CSV via the UI.
 
-Required columns: Order_Date, Sales, Product_Name, Category, Region.
+- **Default path:** `data/train.csv` (fallback: `train.csv` in project root)
+- **Required columns (canonical name → aliases supported):**
+
+  | Canonical   | Aliases (common Superstore CSV headers)     |
+  |------------|---------------------------------------------|
+  | Order_Date | Order Date                                  |
+  | Sales      | Sales                                       |
+  | Product_Name | Product Name                             |
+  | Category   | Category                                    |
+  | Region     | Region                                      |
+
+  Column names are normalized (whitespace trimmed; aliases mapped to canonical) before KPI computation. Optional: Sub-Category / Sub_Category.
+
+- **Missing-value policy:** Rows with missing Order_Date or Sales are dropped before KPI computation (documented in `kpi.py`). No imputation is applied.
 
 ## Outputs
 
@@ -103,10 +115,12 @@ Per run, the following files are always written (when a report is generated):
 
 - `outputs/kpi_tables/kpi_table_<run_id>.csv`
 - `outputs/decisions/decision_<run_id>.json`
-- `outputs/template_reports/rule_based_report_<run_id>.md`
+- **Rule-based baseline report:** `outputs/template_reports/rule_based_report_<run_id>.md` (deterministic report from the rule engine; the folder name “template_reports” is legacy; the file content is the rule-based baseline).
 - `outputs/llm_reports/llm_report_<run_id>.md` (or placeholder if LLM is disabled)
 
 Additional outputs: `outputs/definitions/` (kpi_definitions.json, rule_definitions.json), `outputs/prompts/`, `outputs/evaluation_results.csv`, `outputs/hallucination_flags.json`.
+
+**Evaluation module** (`evaluation.py`): Compares rule-based vs LLM-generated explanations using rubric scores (clarity, correctness, usefulness, consistency) and automatic hallucination detection (numbers in the LLM report that do not appear in the decision input). Results are saved to CSV for reproducible comparison.
 
 **Each run is fully reproducible from saved KPI tables and decision logs.**
 
@@ -139,6 +153,16 @@ All KPIs are derived **only** from dataset columns (`Order_Date`, `Sales`, `Prod
 | mom_positive | MoM change >= +10% | +10% | Meaningful upward change; avoids tiny fluctuations |
 | mom_negative | MoM change <= -10% | -10% | Meaningful downward change |
 | mom_stable | Otherwise | ±10% band | Within normal fluctuation |
-| anomaly_z | \|z\| > 1.5 | 1.5 | Moderate statistical outlier; ~87% within ±1.5 |
+| anomaly_z | \|z\| > 1.5 | 1.5 | Dataset-relative outlier heuristic; flags months that deviate noticeably from the observed series |
 | region_concentration | Top region share >= 30% | 30% | Over-reliance on single region |
 | category_key_driver | Top category share >= 35% | 35% | Dominant category; key driver note |
+
+---
+
+## References (web pages)
+
+- Gartner — IT Glossary (Business Intelligence, KPIs): https://www.gartner.com/en/information-technology/glossary
+- IBM — What is business intelligence?: https://www.ibm.com/topics/business-intelligence
+- Stanford — Introduction to expert systems / rule-based systems: https://cs.stanford.edu/people/eroberts/cs181/projects/2004-05/expert-systems/index.html
+- Microsoft — Responsible AI: https://www.microsoft.com/en-us/ai/responsible-ai
+- Hugging Face — Evaluate library (model and dataset evaluation): https://huggingface.co/docs/evaluate
